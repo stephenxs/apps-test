@@ -25,6 +25,7 @@ unsigned int delay = 100;
 unsigned int basetid;
 unsigned int sharememory;
 unsigned int switch_by_delay;
+unsigned int switch_by_yield;
 unsigned int max_test_count = 0x1000;
 unsigned int bigdelay = 0;
 
@@ -141,6 +142,8 @@ void test_entry_1_no_preempt_low_task(int myid)
 		{
 		  if (switch_by_delay)
 		    usleep(delay) /*set to preemptable*/;
+		  else if (switch_by_yield)
+		    sched_yield();
 		  else {
 		    sched_setpreempt(1);
 		    sched_setpreempt(0);
@@ -262,6 +265,11 @@ printf("after wait\n");
 	    break;
 	  case 'd':
 	    switch_by_delay = 1;
+	    switch_by_yield = 0;
+	    break;
+	  case 'y':
+	    switch_by_yield = 1;
+	    switch_by_delay = 0;
 	    break;
 	  case 't':
 	    rc = 1000000;
@@ -332,10 +340,11 @@ printf("after wait\n");
 	    sscanf(argv[i]+1, "%d", &bdelay);
 	    break;
 	  case '?':
-	    printf("usage: %s [l] [d] [T<test count>] [D<delay>] [b<base priority>] [t<delay>] [i<base tid>] [B<delay>]\n", argv[0]);
+	    printf("usage: %s [l] [d] [y] [T<test count>] [D<delay>] [b<base priority>] [t<delay>] [i<base tid>] [B<delay>]\n", argv[0]);
 	    printf("          [C] [s|F|S<sys v shmem region>]");
 	    printf("  l -- locktask\n"
 		   "  d -- switch lower priority thread by usleep(default by preemption)\n"
+		   "  y -- switch lower priority thread by yield\n"
 		   "  T -- max test count\n"
 		   "  D -- delay per usleep\n"
 		   "  b -- base priority\n"
