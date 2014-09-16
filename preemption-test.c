@@ -2,9 +2,23 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <fcntl.h>
 #include <atomic.h>
 #include <sys/shm.h>
 #include <sys/stat.h>
+
+#include <unistd.h>
+#include <sys/syscall.h>
+
+int mygettid()
+{
+#ifdef SYS_gettid
+int tid = syscall(SYS_gettid);
+#else
+#error "SYS_gettid unavailable on this system"
+#endif
+return tid;
+}
 
 #define MAX_RECORD	0x800000
 #define MAX_TASK	16
@@ -28,6 +42,10 @@ unsigned int switch_by_delay;
 unsigned int switch_by_yield;
 unsigned int max_test_count = 0x1000;
 unsigned int bigdelay = 0;
+unsigned int quiet = 0;
+unsigned int allfinish = 0;
+const char *faultinj_fn;
+const char *faultinj_ar;
 
 int my_atomic_exc_and_add(int *p, int value)
 {
@@ -126,6 +144,7 @@ void test_entry_1_no_preempt_low_task(int myid)
 {
 	int rc = 0, i = 0;
 
+	printf("myid is %d, tid is %d\n", myid, mygettid());
 	while (!*starttest) usleep(delay);
 
 	//set to no preempt
@@ -167,6 +186,7 @@ void test_entry_1_preempt_high_task(int myid)
 {
 	int rc = 0, i = 0;
 
+        printf("myid is %d, tid is %d\n", myid, mygettid());
 	while (!*starttest) usleep(delay);
 
 	while (rc == 0)
@@ -191,6 +211,7 @@ void test_entry_1_preempt_high_task(int myid)
 
 void test_entry_big_delaier(int bdelay)
 {
+        printf("big delaie tid is %d\n", mygettid());
 	while (!*starttest) usleep(delay);
 	printf("before sleep %d\n", bdelay);
 	sleep(bdelay);
@@ -200,6 +221,22 @@ void test_entry_big_delaier(int bdelay)
 	sleep(bdelay);
 	printf("clear bigdelay\n");
 	bigdelay = 0;
+}
+
+void test_entry_preempt_page_fault(int unused)
+{
+    const char *filename = faultinj_fn, *argu = faultinj_ar;
+    int arglen = strlen(argu), file, rc;
+
+    printf("tid %d going to write [%s] to %s\n", mygettid(), argu, filename);
+    file = open(filename, O_RDWR, 0);
+    printf("%s is %d, argu [%s] leng %d\n", filename, file, argu, arglen);
+
+    while (!allfinish){
+        usleep(100);
+	write(file, argu, arglen);
+    }
+    printf("wrote [%s] to %s\n", argu, filename);
 }
 
 int testdelaystop;
@@ -231,7 +268,7 @@ void create_task(int id, int priority, int preemptable, void (*entrypt)(int), pt
   schedp.sched_priority = priority;
   pthread_attr_setschedparam(&attr, &schedp);
 
-  printf("create task %d p %d\n", id, priority);
+  printf("create task %d p %d entrypoint %x\n", id, priority, (unsigned int)entrypt);
   pthread_create(tid, &attr, (void*(*)(void*))entrypt, (void*)id);
 }
 
@@ -339,9 +376,17 @@ printf("after wait\n");
 	  case 'B':
 	    sscanf(argv[i]+1, "%d", &bdelay);
 	    break;
+	  case 'q':
+	    quiet = 1;
+	    break;
+	  case 'P':
+	    faultinj_fn = argv[i]+1;
+	    i++;
+	    faultinj_ar = argv[i];
+	    break;
 	  case '?':
 	    printf("usage: %s [l] [d] [y] [T<test count>] [D<delay>] [b<base priority>] [t<delay>] [i<base tid>] [B<delay>]\n", argv[0]);
-	    printf("          [C] [s|F|S<sys v shmem region>]");
+	    printf("          [C] [s|F|S<sys v shmem region>] [P<filename> <arg>]\n");
 	    printf("  l -- locktask\n"
 		   "  d -- switch lower priority thread by usleep(default by preemption)\n"
 		   "  y -- switch lower priority thread by yield\n"
@@ -355,7 +400,8 @@ printf("after wait\n");
 		   "  S -- start a shmem test\n"
 		   "  F -- finish a shmem region test and printout result\n"
 		   "  t -- test busywait vs. usleep\n"
-		   "  B -- big delay\n");
+		   "  B -- big delay\n"
+		   "  P -- preempt page fault exception\n");
 	    return;
 	  default:
 	    printf("invalid argument %s\n", argv[i]);
@@ -369,6 +415,10 @@ printf("after wait\n");
 	       max_test_count,
 	       delay);
 
+	if (faultinj_fn) {
+	  create_task(0, 0, 0, test_entry_preempt_page_fault, &tid[0]);
+	  usleep(1000);
+	}
 	create_task(basetid + 0, base_pri, 0, test_entry_1_no_preempt_low_task, &tid[0]);
 	base_pri += 4;
 	create_task(basetid + 1, base_pri, 0, test_entry_1_no_preempt_low_task, &tid[1]);
@@ -394,7 +444,8 @@ printf("after wait\n");
 	pthread_join(tid[2], NULL);
 	pthread_join(tid[3], NULL);
 
-	if (!sharememory) {
+	allfinish = 1;
+	if (!sharememory && !quiet) {
 	  getchar();
 	  printtestbuffer();
 	}
