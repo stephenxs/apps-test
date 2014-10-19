@@ -3,7 +3,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <fcntl.h>
-#include <atomic.h>
+//#include <atomic.h>
 #include <sys/shm.h>
 #include <sys/stat.h>
 
@@ -19,7 +19,19 @@ int tid = syscall(SYS_gettid);
 #endif
 return tid;
 }
-
+unsigned int locktask;
+int sched_setpreempt(int enable)
+{
+#ifndef SYS_sched_enablepreempt
+#define SYS_sched_enablepreempt 4351
+#if ARCH!=MIPS
+#error sched_enablepreempt not defined
+#endif
+#endif
+if (locktask)
+return syscall(SYS_sched_enablepreempt, enable);
+else return 0;
+}
 #define MAX_RECORD	0x800000
 #define MAX_TASK	16
 #define MAX_TASK_LINE	4
@@ -47,13 +59,21 @@ unsigned int allfinish = 0;
 const char *faultinj_fn;
 const char *faultinj_ar;
 
-int my_atomic_exc_and_add(int *p, int value)
+int my_atomic_exc_and_add(int *p, int value, int *lastpos)
 {
 	int result = *p;
-	if (*p == 1)
+	if (result == 1) {
+	  result = value;
 	  *p = value;
+	}
 	else
 	  *p += value;
+	if (*lastpos > result) {
+	  result = *lastpos + value;
+	  *p = result;
+	  *p += value;
+	  printf("reentrance atomic add, jump from %d to %d\n", *lastpos, result);
+	}
 	return result;
 }
 //__NR_sched_setpreempt
@@ -66,9 +86,9 @@ int busywait(int period)
 }
 
 //int my_atomic_comp_and_exc_byte(char *p, 
-int putvalue(char value, int taskid)
+int putvalue(char value, int taskid, int *lastpos)
 {
-	int position = my_atomic_exc_and_add(testrecordptr, MAX_TASK_LINE);
+	int position = my_atomic_exc_and_add(testrecordptr, MAX_TASK_LINE, lastpos);
 	int oldvalue, newvalue, old2;
 	char *pnewvalue;
 
@@ -77,8 +97,15 @@ int putvalue(char value, int taskid)
 	if (position >= max_test_count || taskid >= MAX_TASK)
 		return -1;//test finish
 
+	value &= 0x7f;
+	if (value == 0)
+		value = 0xa5;
+	if (position <= *lastpos) {
+		printf("task %d got position %d error, last %d value %d, jump\n ", taskid, position, *lastpos, value); 
+	}
 	pnewvalue = (char*)&testrecordarea[position];
 	pnewvalue[taskid] = value;
+	*lastpos = position;
 	return 0;
 #if 0
 	while (1) {
@@ -95,57 +122,96 @@ int putvalue(char value, int taskid)
 	}
 #endif
 }
-
-void printtestbuffer()
+void printline(int pos)
 {
-	int i;
-	char c;
+	printf("%08x: %08x %08x %08x %08x\n", pos,
+		ntohl(testrecordarea[pos]),
+		ntohl(testrecordarea[pos+1]),
+		ntohl(testrecordarea[pos+2]),
+		ntohl(testrecordarea[pos+3]));
+}
+void printtestbuffer(int quiet)
+{
+  int i, j, k;
+  char c, *ptest;
+  unsigned char cgroup_lastvalue[MAX_TASK_LINE] = {0};
+  unsigned char cgroup_lasttask[MAX_TASK / MAX_TASK_LINE] = {0};
+  unsigned char cgroup_lastcanswitch[MAX_TASK / MAX_TASK_LINE] = {1,1,1,1};
+  int cgroup_lastposi[MAX_TASK_LINE];
+  unsigned char cgroup, value, task, canswitch;
 
-	printf("           0 1 2 3  4 5 6 7  8 9 a b  c d e f\n");
+	if (!quiet) printf("           0 1 2 3  4 5 6 7  8 9 a b  c d e f\n");
 	for(i = 0; i < max_test_count; ) {
-		printf("%08x: %08x %08x %08x %08x\n", i,
-			testrecordarea[i],
-			testrecordarea[i+1],
-			testrecordarea[i+2],
-			testrecordarea[i+3]);
+		if (!quiet)
+			printline(i);
+		ptest = (char*)&testrecordarea[i];
+		cgroup = 0;
+		canswitch = 0;
+		value = 0;
+		for(j = 0; j < MAX_TASK; j++) {
+		  if (ptest[j] != 0) {
+		    if (value != 0) {
+		      if (quiet)
+			printline(i);
+		      printf("%%warnning: duplicate non-zero value\n");
+		    }
+		    cgroup = j / MAX_TASK_LINE;
+		    value = ptest[j];
+		    if (value == 0xa5) value = 0x80;
+		    task = j % MAX_TASK_LINE;
+		    canswitch = value % 16 == 0 || task == 3 && value % 4 == 0;
+
+		    if (i != 0) {
+			if (cgroup_lasttask[cgroup] == task 
+				&& ((cgroup_lastvalue[cgroup] + 1)&0x7f) == (value&0x7f)
+					|| //task switch permitted
+				cgroup_lasttask[cgroup] != task && cgroup_lastcanswitch[cgroup])
+				;
+			else {// illegal switch
+				int k;
+				printf("===================================================\n");
+				printline(cgroup_lastposi[cgroup]);
+
+				printf("          ");
+				for (k = 0; k < cgroup; k++)
+					printf("         ");
+				for (k = 0; k < cgroup_lasttask[cgroup]; k++)
+					printf("  ");
+				printf("^^switched!\n");
+				printf("task %d cg %d value %d \n", task, cgroup, value);
+				printf("cg lasttask %d cg lastvalue %d cg lastcanswitch %d\n",
+					cgroup_lasttask[cgroup], cgroup_lastvalue[cgroup], cgroup_lastcanswitch[cgroup]);
+
+				printline(i);
+				printf("===================================================\n");
+			}
+
+			cgroup_lastvalue[cgroup] = value;
+			cgroup_lasttask[cgroup] = task;
+			cgroup_lastcanswitch[cgroup] = canswitch;
+			cgroup_lastposi[cgroup] = i;
+		    }
+		  }
+		}
+
 		i += 4;
-		if (i % 64 == 0) {
+		if (i % 64 == 0 && !quiet) {
 			c = getchar();
 			if (c == 'q')
 				return;
 			printf("           0 1 2 3  4 5 6 7  8 9 a b  c d e f\n");
 		}
 	}
+
 	printf("counter %d\n", unused);
-}
-int sched_setpreempt(int enable)
-{
-      long err = 0;
-      if (locktask) {
-	    register long __v0 __asm__("$2") ;
-	    register long __a0 __asm__("$4") = (long) enable;
-	    register long __a3 __asm__("$7");
-	    __asm__ __volatile__ (
-				  ".set\tnoreorder\n\t"
-				  "li\t$2, %2\t\t\t# "
-				  "sched_setpreempt"
-				  "\n\t"
-				  "syscall\n\t"
-				  ".set reorder" : "=r" (__v0), "=r" (__a3)
-				                 : "i" (((4000 + 351))), "r" (__a0) 
-				                 : "$1", "$3", "$8", "$9", "$10", "$11", "$12", "$13", "$14", "$15", "$24", "$25", "hi", "lo", "memory"
-				  );
-	    err = __a3;
-      }
-      return err;
 }
 
 void test_entry_1_no_preempt_low_task(int myid)
 {
-	int rc = 0, i = 0;
+	int rc = 0, i = 0, pos = 0;
 
 	printf("myid is %d, tid is %d\n", myid, mygettid());
-	while (!*starttest) usleep(delay);
+	while (!*starttest) usleep(delay*1000);
 
 	//set to no preempt
 	rc = sched_setpreempt(0);
@@ -155,7 +221,7 @@ void test_entry_1_no_preempt_low_task(int myid)
 	while (rc == 0)
 	{
 		i++;
-		rc = putvalue(i, myid);
+		rc = putvalue(i, myid, &pos);
 		busywait(0x10000);
 		if (i % 16 == 0)
 		{
@@ -184,7 +250,7 @@ void test_entry_1_no_preempt_low_task(int myid)
 
 void test_entry_1_preempt_high_task(int myid)
 {
-	int rc = 0, i = 0;
+	int rc = 0, i = 0, pos = 0;
 
         printf("myid is %d, tid is %d\n", myid, mygettid());
 	while (!*starttest) usleep(delay);
@@ -192,7 +258,7 @@ void test_entry_1_preempt_high_task(int myid)
 	while (rc == 0)
 	{
 		i++;
-		rc = putvalue(i, myid);
+		rc = putvalue(i, myid, &pos);
 		busywait(0x10000);
 		if (i % 4 == 0)
 		{
@@ -364,7 +430,7 @@ printf("after wait\n");
 	      printf("start %d\n", *testrecordarea);
 	      *testrecordarea = 0;
 	      testrecordarea++;
-	      printtestbuffer();
+	      printtestbuffer(quiet);
 	      return;
 	    }
 	    if (argv[i][0] == 'S') {
@@ -386,7 +452,7 @@ printf("after wait\n");
 	    break;
 	  case '?':
 	    printf("usage: %s [l] [d] [y] [T<test count>] [D<delay>] [b<base priority>] [t<delay>] [i<base tid>] [B<delay>]\n", argv[0]);
-	    printf("          [C] [s|F|S<sys v shmem region>] [P<filename> <arg>]\n");
+	    printf("          [C] [s|F|S<sys v shmem region>] [P<filename> <arg>][q]\n");
 	    printf("  l -- locktask\n"
 		   "  d -- switch lower priority thread by usleep(default by preemption)\n"
 		   "  y -- switch lower priority thread by yield\n"
@@ -401,7 +467,8 @@ printf("after wait\n");
 		   "  F -- finish a shmem region test and printout result\n"
 		   "  t -- test busywait vs. usleep\n"
 		   "  B -- big delay\n"
-		   "  P -- preempt page fault exception\n");
+		   "  P -- preempt page fault exception\n"
+		   "  q -- quiet\n");
 	    return;
 	  default:
 	    printf("invalid argument %s\n", argv[i]);
@@ -445,8 +512,12 @@ printf("after wait\n");
 	pthread_join(tid[3], NULL);
 
 	allfinish = 1;
-	if (!sharememory && !quiet) {
-	  getchar();
-	  printtestbuffer();
+	if (!sharememory) {
+	  if (quiet)
+	    printtestbuffer(1);
+	  else {
+	    getchar();
+	    printtestbuffer(0);
+	  }
 	}
 }
