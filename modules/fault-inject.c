@@ -9,6 +9,7 @@
 #include <linux/slab.h>
 #include <linux/pid.h>
 #include <linux/sched.h>
+#include <asm/uaccess.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("SunXi");

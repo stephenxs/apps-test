@@ -7,6 +7,7 @@
 #include <linux/slab.h>
 #include <linux/pid.h>
 #include <linux/sched.h>
+#include <asm/uaccess.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("SunXi(mr.sunxi@gmail.com)");
@@ -82,18 +83,30 @@ static ssize_t showmmap_write(struct file *file, const char __user *buf, size_t 
   mm = tsk->mm;
 
   while(pagecount > 0) {
+    pagecount--;
     pgd = pgd_offset(mm, addr);
+    if (!pgd || !pgd_present(*pgd)) {
+	ptxt += sprintf(ptxt, "[%08x]:not mapped pgd\n", addr);
+	continue;
+    }
     pud = pud_offset(pgd, addr);
+    if (!pud || !pud_present(*pud)) {
+	ptxt += sprintf(ptxt, "[%08x]:not mapped pud(pgd %08x)\n", addr, pgd_val(*pgd));
+	continue;
+    }
     pmd = pmd_offset(pud, addr);
-    pte = pte_offset(pmd, addr);
+    if (!pmd || !pmd_present(*pmd)) {
+	ptxt += sprintf(ptxt, "[%08x]:not mapped pmd(pgd %08x pud %08x)\n", addr, pgd_val(*pgd), pud_val(*pud));
+	continue;
+    }
+    pte = pte_offset_map(pmd, addr);
 
-    if (pte && !(pte_val(*pte) & _PAGE_PRESENT))
-      ptxt += sprintf(ptxt, "[%08x]:not mapped\n", addr);
+    if (!pte || !pte_present(*pte))
+      ptxt += sprintf(ptxt, "[%08x]:not mapped(pgd %08x pud %08x pmd %08x)\n", addr, pgd_val(*pgd), pud_val(*pud), pmd_val(*pmd));
     else
       ptxt += sprintf(ptxt, "[%08x]:phy %08x %d\n", addr, pte_val(*pte), pte_pfn(*pte));
 
     addr += PAGE_SIZE;
-    pagecount--;
   }
 
  fail:

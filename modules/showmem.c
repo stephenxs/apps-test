@@ -5,6 +5,7 @@
 #include <linux/device.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
+#include <asm/uaccess.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("SunXi");

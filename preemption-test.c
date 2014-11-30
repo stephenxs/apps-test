@@ -6,6 +6,7 @@
 //#include <atomic.h>
 #include <sys/shm.h>
 #include <sys/stat.h>
+#include <sched.h>
 
 #include <unistd.h>
 #include <sys/syscall.h>
@@ -31,6 +32,20 @@ int sched_setpreempt(int enable)
 if (locktask)
 return syscall(SYS_sched_enablepreempt, enable);
 else return 0;
+}
+
+/*set affinity to NR_CPUS - 1*/
+int sched_setaffinity()
+{
+#ifndef SYS_sched_setaffinity
+#error sched_setaffinity not defined
+#else
+  cpu_set_t cpumsk = {0};
+  //  cpumask_set_cpu(NR_CPUS - 1, &cpumsk);
+  __CPU_SET_S(1, sizeof(cpumsk), &cpumsk);
+  printf("setting affinity for %d\n", getpid());
+  return syscall(SYS_sched_setaffinity, getpid(), sizeof(cpumsk), &cpumsk);
+#endif
 }
 #define MAX_RECORD	0x800000
 #define MAX_TASK	16
@@ -345,6 +360,8 @@ void main(int argc, char *argv[])
   int base_pri = 70, bdelay = 0;
   int segment_id;
 	struct sched_param param;
+
+	sched_setaffinity();
 
 	param.sched_priority = 70;
 	rc = pthread_setschedparam(pthread_self(), SCHED_FIFO, &param);
